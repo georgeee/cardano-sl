@@ -12,6 +12,7 @@ module Pos.Wallet.Web.Methods.Logic
        , getAccount
        , getAccounts
 
+       , doesWalletExist
        , createWalletSafe
        , newAccount
        , newAccountIncludeUnready
@@ -350,6 +351,13 @@ createWalletSafe cid wsMeta isReady = do
     -- Return the newly created wallet irrespective of whether it's ready yet
     ws' <- getWalletSnapshot db
     getWalletIncludeUnready ws' mps True cid
+
+doesWalletExist
+    :: MonadWalletLogic ctx m
+    => CId Wal -> m Bool
+doesWalletExist wId = do
+    (_, _, ws) <- getSnapshots
+    return $ isJust $ getWalletMetaIncludeUnready ws True wId
 
 getSnapshots
     :: MonadWalletLogic ctx m

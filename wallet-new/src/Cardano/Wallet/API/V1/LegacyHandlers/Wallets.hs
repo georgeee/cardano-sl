@@ -47,6 +47,7 @@ handlers = newWallet
     :<|> deleteWallet
     :<|> getWallet
     :<|> updateWallet
+    :<|> checkExternalWallet
     :<|> newExternalWallet
     :<|> deleteExternalWallet
 
@@ -198,6 +199,60 @@ updateWallet wid WalletUpdate{..} = do
         -- reacquire the snapshot because we did an update
         ws' <- V0.askWalletSnapshot
         addWalletInfo ws' updated
+
+-- | Check if external wallet is presented in node's wallet db.
+checkExternalWallet
+    :: ( V0.MonadWalletLogic ctx m
+       , V0.MonadBlockchainInfo m
+       )
+    => Text
+    -> m (WalletResponse Wallet)
+checkExternalWallet encodedExtPubKey = do
+    publicKey <- case decodeBase58PublicKey encodedExtPubKey of
+        Left problem    -> throwM (InvalidPublicKey $ sformat build problem)
+        Right publicKey -> return publicKey
+
+    ws <- V0.askWalletSnapshot
+
+    let walletId = encodeCType . Core.makePubKeyAddressBoot $ publicKey
+    walletExists <- V0.doesWalletExist walletId
+    if walletExists
+        then do
+            -- Wallet is here, it means that user already used this wallet (for example,
+            -- hardware device) on this computer, so we have to return stored information
+            -- about this wallet.
+            v0wallet <- V0.getWallet walletId
+            single <$> addWalletInfo ws v0wallet
+        else do
+            -- No such wallet in db, it means that this wallet (for example, hardware
+            -- device) was not used on this computer. But since this wallet _could_ be
+            -- used on another computer, we have to (try to) recover this wallet.
+            --
+            -- Add this public key in the 'public.key' file. Public key will be used during
+            -- synchronization with the blockchain.
+            addPublicKey publicKey
+
+            let isReady = False -- We want to sync this wallet with the blockchain!
+                largeCurrencyUnit = 0
+                defaultMeta = V0.CWalletMeta "ADA external wallet"
+                                             V0.CWAStrict
+                                             largeCurrencyUnit
+            -- Create new external wallet.
+            V0.CWallet{..} <- V0.createWalletSafe walletId defaultMeta isReady
+
+            -- Add initial account in this external wallet.
+            let accountMeta    = V0.CAccountMeta { caName = "Initial account" }
+                accountInit    = V0.CAccountInit { caInitWId = cwId, caInitMeta = accountMeta }
+                includeUnready = True
+            void $ V0.newExternalAccountIncludeUnready includeUnready accountInit
+
+            db <- V0.askWalletDB
+            removeHistoryCache db walletId
+            -- BListener checks current syncTip before applying update,
+            -- thus setting it up to date manually here
+            withStateLockNoMetrics HighPriority $ \tip -> setWalletSyncTip db walletId tip
+            v0wallet <- V0.getWallet walletId
+            single <$> addWalletInfo ws v0wallet
 
 -- | Creates a new or restores an existing external @wallet@ given a 'NewExternalWallet' payload.
 -- Returns to the client the representation of the created or restored wallet in the 'Wallet' type.
